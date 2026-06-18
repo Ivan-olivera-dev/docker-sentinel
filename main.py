@@ -77,9 +77,12 @@ def start_monitoring():
             filters = {"type": "container", "event": "die"}
             
             for event in client.events(filters=filters, decode=True):
-                container_id = event.get("id")
+                container_id = event.get("id") or event.get("Actor", {}).get("ID")
                 container_name = event.get("Actor", {}).get("Attributes", {}).get("name", "Unknown")
                 exit_code = event.get("Actor", {}).get("Attributes", {}).get("exitCode", "Unknown")
+
+                if not container_id:
+                    continue
 
                 try:
                     container = client.containers.get(container_id)
