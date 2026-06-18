@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  sentinel:
+    build: .
+    container_name: docker-sentinel
+    restart: unless-stopped
+    # Montamos el socket de Docker para que el script pueda "ver" y "controlar" contenedores
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+
+  # ==========================================
+  # CONTENEDOR DE PRUEBA (Para testear el Auto-Healer)
+  # ==========================================
+  test-app:
+    image: nginx:alpine
+    container_name: sentinel-test-app
+    # IMPORTANTE: Esta es la etiqueta mágica. 
+    # Solo los contenedores que la tengan serán revividos.
+    labels:
+      - "sentinel.enable=true"
