@@ -34,9 +34,13 @@ def check_crash_loop(container_name):
     crash_tracker[container_name] = [t for t in crash_tracker[container_name] if now - t <= TIME_WINDOW_SEC]
     
     # Si hay demasiadas caídas recientes, estamos en Crash Loop
-    if len(crash_tracker[container_name]) > MAX_RESTARTS:
-        return True
-    return False
+    is_loop = len(crash_tracker[container_name]) > MAX_RESTARTS
+    
+    # Eliminar el contenedor del rastreador si ya no tiene caídas para evitar fugas de memoria
+    if not crash_tracker[container_name]:
+        del crash_tracker[container_name]
+        
+    return is_loop
 
 def async_send_email(container_name, exit_code, is_critical):
     """ Lanza el envío de correo en un hilo paralelo para no bloquear Sentinel """

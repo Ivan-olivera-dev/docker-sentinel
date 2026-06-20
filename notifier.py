@@ -4,11 +4,20 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO")
+import html
+
+def get_secret(secret_name, default=None):
+    secret_path = f"/run/secrets/{secret_name.lower()}"
+    if os.path.exists(secret_path):
+        with open(secret_path, "r") as f:
+            return f.read().strip()
+    return os.getenv(secret_name, default)
+
+SMTP_SERVER = get_secret("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(get_secret("SMTP_PORT", 587))
+SMTP_USER = get_secret("SMTP_USER")
+SMTP_PASSWORD = get_secret("SMTP_PASSWORD")
+ALERT_EMAIL_TO = get_secret("ALERT_EMAIL_TO")
 
 def send_alert_email(container_name: str, exit_code: str, is_critical: bool = False):
     """
@@ -19,17 +28,24 @@ def send_alert_email(container_name: str, exit_code: str, is_critical: bool = Fa
         print(f"⚠️ [NOTIFIER] Faltan credenciales SMTP. No se enviará email para {container_name}.")
         return
 
+    # Prevenir Header Injection limpiando saltos de línea
+    safe_container_name = "".join(container_name.splitlines())
+    
+    # Prevenir Inyección HTML escapando entidades
+    safe_container_name_html = html.escape(safe_container_name)
+    safe_exit_code_html = html.escape(str(exit_code))
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if is_critical:
-        subject = f"🛑 FATAL: Crash Loop Detectado en {container_name}"
+        subject = f"🛑 FATAL: Crash Loop Detectado en {safe_container_name}"
         header_color = "#991b1b" # Rojo oscuro
         header_text = "🛑 FATAL: Bucle de Muerte Detectado"
         status_color = "#ef4444"
         status_text = "AUTO-HEALER DESACTIVADO ❌ (Requiere intervención humana)"
         message_body = "El contenedor ha muerto repetidamente en un corto periodo de tiempo. Para evitar saturación, el Auto-Healer ha <strong>detenido los reinicios automáticos</strong> para este contenedor."
     else:
-        subject = f"🚨 Docker Sentinel: Contenedor Caído ({container_name})"
+        subject = f"🚨 Docker Sentinel: Contenedor Caído ({safe_container_name})"
         header_color = "#ef4444" # Rojo normal
         header_text = "🚨 Alerta: Contenedor Caído"
         status_color = "#10b981"
@@ -50,11 +66,11 @@ def send_alert_email(container_name: str, exit_code: str, is_critical: bool = Fa
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
               <tr>
                 <td style="padding: 10px; border-bottom: 1px solid #eee; font-weight: bold; width: 35%;">Contenedor:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee; color: #1f2937; font-family: monospace; font-size: 16px;">{container_name}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee; color: #1f2937; font-family: monospace; font-size: 16px;">{safe_container_name_html}</td>
               </tr>
               <tr>
                 <td style="padding: 10px; border-bottom: 1px solid #eee; font-weight: bold;">Último Exit Code:</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{exit_code}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">{safe_exit_code_html}</td>
               </tr>
               <tr>
                 <td style="padding: 10px; border-bottom: 1px solid #eee; font-weight: bold;">Hora del Incidente:</td>
