@@ -1,13 +1,25 @@
 version: '3.8'
 
 services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: docker-socket-proxy
+    environment:
+      - CONTAINERS=1
+      - POST=1
+      - EVENTS=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
   sentinel:
     build: .
     container_name: docker-sentinel
     restart: unless-stopped
-    # Montamos el socket de Docker para que el script pueda "ver" y "controlar" contenedores
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - docker-proxy
+    environment:
+      - DOCKER_HOST=tcp://docker-proxy:2375
     env_file:
       - .env
 
