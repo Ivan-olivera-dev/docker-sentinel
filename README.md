@@ -1,23 +1,55 @@
 <div align="center">
-  <h1>🛡️ Docker Sentinel (Auto-Healer)</h1>
-  <p>A lightweight, zero-dependency Docker monitoring daemon that auto-restarts crashed containers and sends beautiful HTML email alerts. Built for resilience and production environments.</p>
+  <h1>🛡️ Docker Sentinel</h1>
+  <p><strong>Lightweight, Zero-Trust Auto-Healing Daemon & Crash-Loop Circuit Breaker for Docker</strong></p>
+  <p>
+    <a href="https://github.com/Ivan-olivera-dev/docker-sentinel/actions/workflows/ci.yml"><img src="https://github.com/Ivan-olivera-dev/docker-sentinel/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://github.com/Ivan-olivera-dev/docker-sentinel/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+    <img src="https://img.shields.io/badge/python-3.11-3776AB.svg?logo=python&logoColor=white" alt="Python 3.11" />
+    <img src="https://img.shields.io/badge/docker-socket--proxy-2496ED.svg?logo=docker&logoColor=white" alt="Docker Socket Proxy" />
+  </p>
 </div>
 
 ---
 
 ## 📖 Overview
 
-**Docker Sentinel** acts as an automated Site Reliability Engineer (SRE) for your VPS. It listens to the live Docker event stream and instantly detects when a container exits unexpectedly (Exit Code != 0 or generic `die` events). 
+**Docker Sentinel** is an event-driven Site Reliability Engineering (SRE) daemon designed for single-node VPS and self-hosted production environments.
 
-Instead of waking you up at 3 AM for a random memory spike, Sentinel will automatically restart the container. If a container enters a **Crash Loop** (fails repeatedly), Sentinel's built-in Rate Limiter will stop the restart cycle and send a CRITICAL alert to your email.
+Instead of polling container health on an interval, Sentinel subscribes directly to the Docker Engine event stream. When an opted-in container terminates unexpectedly (`exitCode != 0`), Sentinel automatically restarts the workload and dispatches an asynchronous HTML incident notification. If a service enters a **Crash Loop**, Sentinel's sliding-window **Circuit Breaker** halts automatic restarts and sends a single critical escalation alert—preventing CPU thrashing and inbox floods.
 
-## ✨ Features
+---
 
-- ⚡ **Real-Time Monitoring:** Hooks directly into `/var/run/docker.sock` for zero-latency event detection.
-- 🎯 **Opt-in Surveillance:** Only monitors containers explicitly labeled with `sentinel.enable=true`.
-- 🔁 **Anti-Crash Loop (Rate Limiter):** Prevents infinite restart loops and email spam if a container is fundamentally broken (e.g., > 3 crashes in 5 minutes).
-- 📧 **Asynchronous Email Alerts:** Sends beautifully formatted HTML emails via SMTP in a background thread without blocking the monitoring loop.
-- 🛡️ **Daemon Resilience:** Auto-reconnects safely if the host Docker daemon restarts or updates.
+## ✨ Key Engineering Highlights
+
+- 🔒 **Zero-Trust Socket Architecture:** Sentinel runs as an unprivileged user (`sentineluser`) and never mounts `/var/run/docker.sock` directly. All Docker API calls pass through a read-restricted `tecnativa/docker-socket-proxy` over an isolated bridge network with only `CONTAINERS`, `EVENTS`, and `POST` permissions enabled.
+- ⚡ **Event-Driven (<15 MB RAM, ~0% Idle CPU):** Streams real-time `die` events from the Docker daemon with zero polling overhead.
+- 🔁 **Sliding-Window Circuit Breaker:** Tracks failure timestamps per container. If crashes exceed `SENTINEL_MAX_RESTARTS` within `SENTINEL_TIME_WINDOW_SEC`, automatic recovery pauses and duplicate critical alerts are suppressed until the window clears.
+- 🎯 **Granular Opt-In via Labels:** Protects only containers explicitly labeled `sentinel.enable=true`, with optional per-container thresholds and clean-exit policies.
+- 🔑 **Docker Secrets & SMTP Hardening:** Supports both `/run/secrets/*` files and environment variables, enforces SMTP socket timeouts, and sanitizes container metadata against header and HTML injection.
+
+---
+
+## 🏗️ Architecture
+
+```text
+┌──────────────────────┐       Events / Restart       ┌─────────────────────────┐
+│  Monitored Workloads │ ◄──────────────────────────► │   Docker Engine Socket  │
+│ sentinel.enable=true │                              │   /var/run/docker.sock  │
+└──────────────────────┘                              └────────────▲────────────┘
+                                                                   │ (ro mount)
+┌──────────────────────┐     tcp://docker-proxy:2375  ┌────────────┴────────────┐
+│   Docker Sentinel    │ ───────────────────────────► │   docker-socket-proxy   │
+│  (Non-Root User)     │   CONTAINERS=1, EVENTS=1     │   Least-Privilege ACL   │
+└──────────┬───────────┘                              └─────────────────────────┘
+           │ Async Thread (SMTP + STARTTLS)
+           ▼
+┌──────────────────────┐
+│  Operator Incident   │
+│  Alert (HTML Email)  │
+└──────────────────────┘
+```
+
+---
 
 ## 🚀 Quick Start
 
@@ -27,37 +59,71 @@ git clone https://github.com/Ivan-olivera-dev/docker-sentinel.git
 cd docker-sentinel
 ```
 
-### 2. Configure Environment Variables
-Copy the example file and fill in your SMTP credentials (e.g., Gmail App Passwords):
+### 2. Configure environment variables
+Copy the example configuration and add your SMTP credentials (e.g., Gmail App Password, Amazon SES, or Resend SMTP):
 ```bash
 cp .env.example .env
 ```
 
-### 3. Deploy Sentinel
-Start the Sentinel daemon using Docker Compose:
+### 3. Launch the stack
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ```
-*Note: A dummy `test-app` container is included in the `docker-compose.yml` so you can instantly test the auto-healing functionality by running `docker kill sentinel-test-app`.*
 
-## 🏷️ How to Monitor Your Containers
+### 4. Simulate a crash
+The compose stack includes an opted-in `sentinel-test-app` container. Trigger an unexpected crash (`SIGKILL`, exit code `137`) and watch Sentinel heal it in real time:
+```bash
+docker kill --signal=SIGKILL sentinel-test-app
+docker compose logs -f sentinel
+```
 
-Sentinel uses an **opt-in** approach. To protect a specific container in your infrastructure, simply add the following label to its `docker-compose.yml`:
+---
+
+## ⚙️ Configuration
+
+### Global Environment Variables (`.env`)
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `DOCKER_HOST` | `tcp://docker-proxy:2375` | Docker API endpoint exposed by the socket proxy |
+| `SENTINEL_MAX_RESTARTS` | `3` | Max automatic restarts allowed within the time window |
+| `SENTINEL_TIME_WINDOW_SEC` | `300` | Sliding window in seconds for crash-loop detection |
+| `SENTINEL_IGNORE_ZERO_EXIT` | `true` | Ignore graceful stops (`exitCode == 0`) by default |
+| `LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `SMTP_SERVER` | `smtp.gmail.com` | Outbound SMTP host |
+| `SMTP_PORT` | `587` | Outbound SMTP port (STARTTLS) |
+| `SMTP_TIMEOUT` | `15` | Socket timeout in seconds for SMTP connections |
+| `SMTP_USER` | — | SMTP username / sender address (also supports `/run/secrets/smtp_user`) |
+| `SMTP_PASSWORD` | — | SMTP password (also supports `/run/secrets/smtp_password`) |
+| `ALERT_EMAIL_TO` | — | Recipient email address for incident notifications |
+
+### Per-Container Docker Labels
+
+Attach these labels to any service in your own `docker-compose.yml`:
 
 ```yaml
 services:
-  my-production-app:
-    image: my-app:latest
+  api:
+    image: my-org/api:latest
     labels:
-      - "sentinel.enable=true" # <--- Sentinel will now protect this container
+      - "sentinel.enable=true"            # Enable Sentinel protection for this container
+      - "sentinel.max_restarts=5"         # Optional: Override max restarts for this service
+      - "sentinel.window_sec=600"         # Optional: Override sliding window (seconds)
+      - "sentinel.restart_on_zero=false"  # Optional: Restart even if exit code is 0
 ```
 
-## 🛠️ Architecture Highlights
+---
 
-- **Base Image:** `python:3.11-alpine` (Minimal footprint, ~50MB).
-- **Core Library:** Official `docker` SDK for Python.
-- **Resource Usage:** < 15MB RAM and 0% Idle CPU.
+## 🧪 Running Tests
+
+Sentinel includes a zero-dependency unit test suite covering label opt-in, exit-code filtering, sliding-window crash-loop circuit breaking, and SMTP payload sanitization:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+---
 
 ## 📝 License
 
-MIT License. Created by [Iván Olivera González](https://ivanolivera.dev).
+Released under the [MIT License](LICENSE). Built by [Iván Olivera González](https://ivanolivera.dev).
