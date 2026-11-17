@@ -1,26 +1,26 @@
 FROM python:3.11-alpine
 
-# Evitar que Python almacene bytecode o buffer de salida (mejor para logs en Docker)
+# No bytecode files, unbuffered output for container logs
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Crear usuario sin privilegios
+# Unprivileged runtime user
 RUN addgroup -S sentinelgroup && adduser -S sentineluser -G sentinelgroup
 
 WORKDIR /app
 
-# Instalar dependencias
+# Runtime dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el código fuente
-COPY . .
+# Application package
+COPY docker_sentinel ./docker_sentinel
 
-# Cambiar la propiedad de los archivos al nuevo usuario
+# Hand the app directory to the runtime user
 RUN chown -R sentineluser:sentinelgroup /app
 
-# Cambiar a usuario no-root
+# Drop root
 USER sentineluser
 
-# Iniciar el vigilante
-CMD ["python", "main.py"]
+# Start the monitor
+CMD ["python", "-m", "docker_sentinel"]

@@ -7,3 +7,10 @@ __pycache__
 tests
 README.md
 LICENSE
+.github
+.venv
+.ruff_cache
+.mypy_cache
+build
+dist
+*.egg-info
