@@ -1,19 +1,27 @@
 services:
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:latest
+    # linuxserver/socket-proxy honours ALLOW_RESTARTS with POST=0; Tecnativa's
+    # image ignores it unless POST=1 (Tecnativa/docker-socket-proxy#101).
+    image: lscr.io/linuxserver/socket-proxy:3.4.7-r0-ls106@sha256:18289eeb306e8e3b70901ffec23eafbb318d73b4514d0bd737dbfc7c5b4fe506
     container_name: docker-socket-proxy
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run
     environment:
       - CONTAINERS=1
-      - POST=1
       - EVENTS=1
+      - ALLOW_RESTARTS=1
+      - POST=0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - sentinel-internal
 
   sentinel:
-    build: .
+    image: ghcr.io/ivan-olivera-dev/docker-sentinel:1.0.0
+    # To build from a local checkout instead, replace `image:` with:
+    # build: .
     container_name: docker-sentinel
     restart: unless-stopped
     depends_on:
@@ -26,7 +34,9 @@ services:
     env_file:
       - .env
     networks:
+      # Reaches the socket proxy over the internal network and SMTP over the egress one.
       - sentinel-internal
+      - sentinel-egress
 
   # Optional demo workload to test auto-healing:
   # Run `docker kill --signal=SIGKILL sentinel-test-app` to trigger recovery.
@@ -39,6 +49,10 @@ services:
       - "sentinel.window_sec=300"
 
 networks:
+  # No external connectivity: only Sentinel can reach the socket proxy.
   sentinel-internal:
     driver: bridge
-    internal: false
+    internal: true
+  # Outbound access for Sentinel (SMTP alerts).
+  sentinel-egress:
+    driver: bridge

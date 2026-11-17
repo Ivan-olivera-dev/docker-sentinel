@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docker-sentinel"
+dynamic = ["version"]
+description = "Watch Docker containers, restart crashed ones and email an alert when one enters a crash loop."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Iván Olivera González" }]
+keywords = ["docker", "monitoring", "crash-loop", "alerting", "containers"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+]
+dependencies = ["docker==7.1.0"]
+
+[project.optional-dependencies]
+dev = ["ruff==0.17.5", "mypy==2.4.1"]
+
+[project.urls]
+Homepage = "https://github.com/Ivan-olivera-dev/docker-sentinel"
+Issues = "https://github.com/Ivan-olivera-dev/docker-sentinel/issues"
+
+[project.scripts]
+docker-sentinel = "docker_sentinel.__main__:main"
+
+[tool.setuptools]
+packages = ["docker_sentinel"]
+
+[tool.setuptools.dynamic]
+version = { attr = "docker_sentinel.__version__" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["docker_sentinel"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = ["docker", "docker.*"]
+ignore_missing_imports = true

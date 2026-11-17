@@ -7,3 +7,16 @@ __pycache__
 tests
 README.md
 LICENSE
+.github
+.venv
+.ruff_cache
+.mypy_cache
+build
+dist
+*.egg-info
+.atl
+odd
+CHANGELOG.md
+docker-compose.yml
+Dockerfile
+.dockerignore
