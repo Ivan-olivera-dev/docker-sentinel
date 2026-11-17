@@ -293,6 +293,13 @@ class TestPolicyEmail(unittest.TestCase):
             self.assertIn("manual intervention required", body)
             self.assertNotIn("has paused automatic restarts", body)
 
+    def test_html_part_escapes_restart_policy_value(self):
+        msg = self.build(True, "<img src=x onerror=alert(1)>\r\nBcc: evil@example.com")
+        html_body = part_text(msg, "text/html")
+        self.assertNotIn("<img", html_body)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;Bcc: evil@example.com", html_body)
+        self.assertIsNone(msg["Bcc"])
+
     def test_without_policy_copy_is_unchanged(self):
         for is_critical in (False, True):
             with self.subTest(is_critical=is_critical):
