@@ -19,7 +19,9 @@ services:
       - sentinel-internal
 
   sentinel:
-    build: .
+    image: ghcr.io/ivan-olivera-dev/docker-sentinel:1.0.0
+    # To build from a local checkout instead, replace `image:` with:
+    # build: .
     container_name: docker-sentinel
     restart: unless-stopped
     depends_on:
