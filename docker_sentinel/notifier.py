@@ -30,7 +30,11 @@ def _single_line(value: object) -> str:
     return "".join(str(value).splitlines())
 
 
-def _alert_copy(container_name: str, is_critical: bool) -> _AlertCopy:
+def _alert_copy(
+    container_name: str, is_critical: bool, docker_restart_policy: str | None = None
+) -> _AlertCopy:
+    if docker_restart_policy is not None:
+        return _docker_managed_copy(container_name, is_critical, docker_restart_policy)
     if is_critical:
         return _AlertCopy(
             subject=f"Docker Sentinel: crash loop detected on {container_name}",
@@ -52,6 +56,38 @@ def _alert_copy(container_name: str, is_critical: bool) -> _AlertCopy:
         status="Restarted automatically",
         header_color="#ef4444",
         status_color="#10b981",
+    )
+
+
+def _docker_managed_copy(container_name: str, is_critical: bool, policy: str) -> _AlertCopy:
+    """Copy for containers that Docker restarts itself (Sentinel only alerts)."""
+    if is_critical:
+        return _AlertCopy(
+            subject=f"Docker Sentinel: crash loop detected on {container_name}",
+            heading="Crash loop detected",
+            summary=(
+                "The container crashed repeatedly within the configured time window. "
+                f"Docker keeps restarting it because of its restart policy {policy}, and "
+                "Docker Sentinel cannot pause Docker's own restarts."
+            ),
+            status=(
+                f"Docker keeps restarting it (restart policy {policy}), "
+                "manual intervention required"
+            ),
+            header_color="#991b1b",
+            status_color="#ef4444",
+        )
+    return _AlertCopy(
+        subject=f"Docker Sentinel: container {container_name} crashed",
+        heading="Container crashed",
+        summary=(
+            "Docker Sentinel detected an unexpected container exit. "
+            f"Docker restarts the container because of its restart policy {policy}, "
+            "so Docker Sentinel did not restart it."
+        ),
+        status=f"Docker restarts it (restart policy {policy})",
+        header_color="#ef4444",
+        status_color="#f59e0b",
     )
 
 
@@ -117,12 +153,18 @@ def build_alert_message(
     sender: str,
     recipient: str,
     now: datetime | None = None,
+    docker_restart_policy: str | None = None,
 ) -> MIMEMultipart:
-    """Build a multipart/alternative alert with a plain-text and an HTML part."""
+    """Build a multipart/alternative alert with a plain-text and an HTML part.
+
+    ``docker_restart_policy`` names the Docker restart policy when Docker, not
+    Sentinel, restarts the container.
+    """
     name = _single_line(container_name)
     code = _single_line(exit_code)
     timestamp = (now or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M:%S UTC")
-    copy = _alert_copy(name, is_critical)
+    policy = None if docker_restart_policy is None else _single_line(docker_restart_policy)
+    copy = _alert_copy(name, is_critical, policy)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = copy.subject
@@ -139,6 +181,7 @@ def send_alert_email(
     exit_code: str,
     is_critical: bool = False,
     smtp_settings: SmtpSettings | None = None,
+    docker_restart_policy: str | None = None,
 ) -> bool:
     """Send an alert email. Returns True when the SMTP server accepted the message."""
     settings = smtp_settings or SmtpSettings.load()
@@ -147,7 +190,12 @@ def send_alert_email(
         return False
 
     msg = build_alert_message(
-        container_name, exit_code, is_critical, sender=settings.user, recipient=settings.recipient
+        container_name,
+        exit_code,
+        is_critical,
+        sender=settings.user,
+        recipient=settings.recipient,
+        docker_restart_policy=docker_restart_policy,
     )
 
     try:

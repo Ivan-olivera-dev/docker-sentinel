@@ -9,7 +9,12 @@ import docker.errors
 
 from docker_sentinel.breaker import CrashBreaker
 from docker_sentinel.config import ContainerPolicy, Settings, SmtpSettings
-from docker_sentinel.monitor import Monitor, is_monitored, should_handle_exit
+from docker_sentinel.monitor import (
+    Monitor,
+    is_monitored,
+    notify_in_background,
+    should_handle_exit,
+)
 from docker_sentinel.notifier import build_alert_message, send_alert_email
 
 SMTP = SmtpSettings(
@@ -23,9 +28,15 @@ SMTP = SmtpSettings(
 
 
 class DummyContainer:
-    def __init__(self, labels=None):
+    def __init__(self, labels=None, attrs=None):
         self.labels = labels or {}
+        if attrs is not None:
+            self.attrs = attrs
         self.restart = MagicMock()
+
+
+def with_restart_policy(name):
+    return {"HostConfig": {"RestartPolicy": {"Name": name, "MaximumRetryCount": 0}}}
 
 
 def send_and_parse(container_name, exit_code, is_critical):
@@ -166,6 +177,261 @@ class TestMonitor(unittest.TestCase):
         self.assertEqual(app.restart.call_count, 2)
         critical = [c for c in notify.call_args_list if c.args[2] is True]
         self.assertEqual(critical, [unittest.mock.call("app", "137", True)])
+
+
+MONITORED = {"sentinel.enable": "true"}
+
+
+class TestDockerRestartPolicy(unittest.TestCase):
+    def test_docker_managed_policies_are_not_restarted_but_still_alerted(self):
+        for policy in ("always", "unless-stopped", "on-failure"):
+            with self.subTest(policy=policy):
+                monitor, notify = make_monitor()
+                app = DummyContainer(MONITORED, with_restart_policy(policy))
+                with self.assertLogs("docker_sentinel", level="INFO") as captured:
+                    monitor.handle_event(FakeClient({"c1": app}), die_event("c1", "app", 1))
+                app.restart.assert_not_called()
+                notify.assert_called_once_with("app", "1", False, docker_restart_policy=policy)
+                messages = "\n".join(r.getMessage() for r in captured.records)
+                self.assertIn(f"restart policy {policy}", messages)
+                self.assertNotIn("Restarting container", messages)
+
+    def test_policy_name_is_matched_case_insensitively(self):
+        monitor, notify = make_monitor()
+        app = DummyContainer(MONITORED, with_restart_policy(" Always "))
+        monitor.handle_event(FakeClient({"c1": app}), die_event("c1", "app", 1))
+        app.restart.assert_not_called()
+        notify.assert_called_once_with("app", "1", False, docker_restart_policy="always")
+
+    def test_no_policy_keeps_sentinel_restarting(self):
+        cases = {
+            "no": with_restart_policy("no"),
+            "empty": with_restart_policy(""),
+            "null": with_restart_policy(None),
+            "missing RestartPolicy": {"HostConfig": {}},
+            "missing HostConfig": {},
+            "unknown": with_restart_policy("sometimes"),
+        }
+        for label, attrs in cases.items():
+            with self.subTest(case=label):
+                monitor, notify = make_monitor()
+                app = DummyContainer(MONITORED, attrs)
+                monitor.handle_event(FakeClient({"c1": app}), die_event("c1", "app", 1))
+                app.restart.assert_called_once_with()
+                notify.assert_called_once_with("app", "1", False)
+
+    def test_missing_attrs_keeps_sentinel_restarting(self):
+        monitor, notify = make_monitor()
+        app = DummyContainer(MONITORED)  # no attrs attribute at all
+        self.assertFalse(hasattr(app, "attrs"))
+        monitor.handle_event(FakeClient({"c1": app}), die_event("c1", "app", 1))
+        app.restart.assert_called_once_with()
+        notify.assert_called_once_with("app", "1", False)
+
+    def test_on_failure_does_not_cover_clean_exit(self):
+        # Docker's on-failure policy ignores exit code 0, so Sentinel restarts it.
+        monitor, notify = make_monitor()
+        labels = {**MONITORED, "sentinel.restart_on_zero": "true"}
+        app = DummyContainer(labels, with_restart_policy("on-failure"))
+        monitor.handle_event(FakeClient({"c1": app}), die_event("c1", "app", 0))
+        app.restart.assert_called_once_with()
+        notify.assert_called_once_with("app", "0", False)
+
+    def test_crash_loop_with_policy_sends_single_critical_alert_naming_policy(self):
+        monitor, notify = make_monitor()
+        labels = {**MONITORED, "sentinel.max_restarts": "2"}
+        app = DummyContainer(labels, with_restart_policy("unless-stopped"))
+        client = FakeClient({"c1": app})
+        with self.assertLogs("docker_sentinel", level="INFO") as captured:
+            for _ in range(5):
+                monitor.handle_event(client, die_event("c1", "app", 137))
+        app.restart.assert_not_called()
+        self.assertEqual(
+            notify.call_args_list,
+            [unittest.mock.call("app", "137", False, docker_restart_policy="unless-stopped")] * 2
+            + [unittest.mock.call("app", "137", True, docker_restart_policy="unless-stopped")],
+        )
+        self.assertTrue(monitor.breaker.is_tripped("app"))
+        critical = [r.getMessage() for r in captured.records if r.levelname == "CRITICAL"]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("restart policy unless-stopped", critical[0])
+        self.assertIn("cannot pause", critical[0])
+        self.assertIn("manual intervention", critical[0])
+
+
+class TestPolicyEmail(unittest.TestCase):
+    NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    def build(self, is_critical, policy):
+        return build_alert_message(
+            "api-service",
+            "137",
+            is_critical,
+            "alerts@example.com",
+            "ops@example.com",
+            now=self.NOW,
+            docker_restart_policy=policy,
+        )
+
+    def test_crash_alert_says_docker_policy_handles_the_restart(self):
+        msg = self.build(False, "always")
+        self.assertEqual(str(msg["Subject"]), "Docker Sentinel: container api-service crashed")
+        for content_type in ("text/plain", "text/html"):
+            body = part_text(msg, content_type)
+            self.assertIn("restart policy always", body)
+            self.assertIn("Docker restarts", body)
+            self.assertNotIn("Docker Sentinel restarted", body)
+            self.assertTrue(body.isascii())
+
+    def test_crash_loop_alert_says_sentinel_cannot_pause_docker_restarts(self):
+        msg = self.build(True, "on-failure")
+        self.assertEqual(str(msg["Subject"]), "Docker Sentinel: crash loop detected on api-service")
+        for content_type in ("text/plain", "text/html"):
+            body = part_text(msg, content_type)
+            self.assertIn("restart policy on-failure", body)
+            self.assertIn("cannot pause", body)
+            self.assertIn("manual intervention required", body)
+            self.assertNotIn("has paused automatic restarts", body)
+
+    def test_without_policy_copy_is_unchanged(self):
+        for is_critical in (False, True):
+            with self.subTest(is_critical=is_critical):
+                with_none = self.build(is_critical, None)
+                default = build_alert_message(
+                    "api-service",
+                    "137",
+                    is_critical,
+                    "a@example.com",
+                    "b@example.com",
+                    now=self.NOW,
+                )
+                self.assertEqual(str(with_none["Subject"]), str(default["Subject"]))
+                self.assertEqual(
+                    part_text(with_none, "text/plain"), part_text(default, "text/plain")
+                )
+        self.assertIn(
+            "has paused automatic restarts", part_text(self.build(True, None), "text/plain")
+        )
+        self.assertIn("restarted the container", part_text(self.build(False, None), "text/plain"))
+
+    def test_send_alert_email_passes_policy_through(self):
+        with patch("docker_sentinel.notifier.smtplib.SMTP") as mock_smtp:
+            smtp_instance = MagicMock()
+            mock_smtp.return_value.__enter__.return_value = smtp_instance
+            self.assertTrue(
+                send_alert_email(
+                    "api", "1", True, smtp_settings=SMTP, docker_restart_policy="always\nBcc: x"
+                )
+            )
+        parsed = email.message_from_string(smtp_instance.sendmail.call_args[0][2])
+        text = part_text(parsed, "text/plain")
+        self.assertIn("restart policy alwaysBcc: x", text)
+        self.assertIsNone(parsed["Bcc"])
+
+    def test_background_notify_forwards_policy(self):
+        done = threading.Event()
+        received = []
+
+        def send(name, code, critical, docker_restart_policy=None):
+            received.append((name, code, critical, docker_restart_policy))
+            done.set()
+
+        notify_in_background(send)("api", "1", True, docker_restart_policy="always")
+        self.assertTrue(done.wait(2))
+        self.assertEqual(received, [("api", "1", True, "always")])
+
+
+class BlockingEventStream:
+    """Events stream that blocks like a real Docker stream until ``close()``."""
+
+    def __init__(self, error_after_close=None):
+        self.opened = threading.Event()
+        self.closed = threading.Event()
+        self.close_calls = 0
+        self.error_after_close = error_after_close
+
+    def __iter__(self):
+        self.opened.set()
+        return self
+
+    def __next__(self):
+        self.closed.wait()
+        if self.error_after_close is not None:
+            raise self.error_after_close
+        raise StopIteration
+
+    def close(self):
+        self.close_calls += 1
+        self.closed.set()
+
+
+class StreamClient(FakeClient):
+    def __init__(self, stream, on_events=None):
+        super().__init__()
+        self.stream = stream
+        self.on_events = on_events
+
+    def events(self, filters=None, decode=False):
+        if self.on_events is not None:
+            self.on_events()
+        return self.stream
+
+
+class TestGracefulShutdown(unittest.TestCase):
+    def run_in_thread(self, monitor):
+        thread = threading.Thread(target=monitor.run, daemon=True)
+        thread.start()
+        return thread
+
+    def test_stop_closes_blocking_events_stream_and_run_returns_promptly(self):
+        for error in (None, ValueError("I/O operation on closed file")):
+            with self.subTest(error_after_close=error):
+                stream = BlockingEventStream(error_after_close=error)
+                monitor = Monitor(
+                    Settings(),
+                    notify=MagicMock(),
+                    client_factory=lambda s=stream: StreamClient(s),
+                    restart_delay=0,
+                    retry_delay=30,
+                )
+                with self.assertLogs("docker_sentinel", level="INFO") as captured:
+                    thread = self.run_in_thread(monitor)
+                    self.assertTrue(stream.opened.wait(2), "events stream never opened")
+                    monitor.stop()
+                    thread.join(timeout=1)
+                self.assertFalse(thread.is_alive(), "run() did not return after stop()")
+                self.assertTrue(stream.closed.is_set())
+                self.assertGreaterEqual(stream.close_calls, 1)
+                levels = {r.levelname for r in captured.records}
+                self.assertNotIn("ERROR", levels)
+                self.assertNotIn("WARNING", levels)
+
+    def test_stop_before_stream_is_registered_still_closes_it(self):
+        stream = BlockingEventStream()
+        monitor = Monitor(Settings(), notify=MagicMock(), restart_delay=0, retry_delay=30)
+        monitor.client_factory = lambda: StreamClient(stream, on_events=monitor.stop)
+        thread = self.run_in_thread(monitor)
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive(), "run() did not return after early stop()")
+        self.assertTrue(stream.closed.is_set())
+
+    def test_stop_tolerates_a_failing_close(self):
+        stream = BlockingEventStream()
+        original_close = stream.close
+
+        def failing_close():
+            original_close()
+            raise OSError("already closed")
+
+        stream.close = failing_close
+        monitor = Monitor(
+            Settings(), notify=MagicMock(), client_factory=lambda: StreamClient(stream)
+        )
+        thread = self.run_in_thread(monitor)
+        self.assertTrue(stream.opened.wait(2))
+        monitor.stop()
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
 
 
 class TestSettings(unittest.TestCase):
